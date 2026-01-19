@@ -11,7 +11,7 @@ import urllib3
 # 關閉 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 讀取環境變數 (GitHub Secrets)
+# 設定 Telegram (從 GitHub Secrets 讀取)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
@@ -80,13 +80,12 @@ def analyze_stock(ticker):
         # 下載資料
         df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True, progress=False)
         
-        # 🔥🔥🔥 必加：修復 yfinance 雙層標題問題 🔥🔥🔥
+        # 🔥 修復 yfinance 雙層標題問題 (必備!)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
         if len(df) < 60: return None
 
-        # --- 以下不用動 ---
         df['Vol_MA60'] = df['Volume'].rolling(window=60).mean()
         df.ta.adx(length=14, append=True)
         df.ta.macd(append=True)
@@ -108,8 +107,7 @@ def analyze_stock(ticker):
             return {
                 "Symbol": ticker,
                 "Price": f"{today['Close']:.2f}",
-                "Vol": vol_msg,
-                "Date": today.name.strftime('%Y-%m-%d')
+                "Vol": vol_msg
             }
     except:
         return None
@@ -117,14 +115,23 @@ def analyze_stock(ticker):
 
 # --- 主程式 ---
 if __name__ == "__main__":
+    print("=== 啟動選股程式 ===")
+    
+    # 1. 抓取所有清單
     sp500 = get_sp500_tickers_from_wiki()
     tw_all = get_tw_all_stocks_from_isin()
     all_targets = list(set(sp500 + tw_all))
     
-    print(f"分析目標: {len(all_targets)} 檔")
+    # 2. 計算數量 (為了顯示在 Telegram)
+    total_count = len(all_targets)
+    us_count = len(sp500)
+    twse_count = len([x for x in tw_all if x.endswith('.TW')])
+    otc_count = len([x for x in tw_all if x.endswith('.TWO')])
+    
+    print(f"分析目標: {total_count} 檔")
     
     results = []
-    # 降低執行緒數量避免 GitHub 資源限制，30 比較安全
+    # 3. 開始掃描
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         future_to_stock = {executor.submit(analyze_stock, s): s for s in all_targets}
         for future in concurrent.futures.as_completed(future_to_stock):
@@ -133,8 +140,12 @@ if __name__ == "__main__":
                 results.append(data)
                 print(f"發現: {data['Symbol']}")
 
-    # --- 發送 Telegram ---
-    msg_header = f"<b>【每日選股報告】</b>\n📅 {datetime.date.today()}\n🔎 條件: 3日內雙金叉\n-----------------"
+    # --- 4. 準備 Telegram 訊息 ---
+    
+    # 這裡就是您要的統計資訊格式
+    stats_info = f"\n📊 <b>掃描統計</b>\n總共分析 {total_count} 檔\n(🇺🇸美股: {us_count}, 🇹🇼上市: {twse_count}, 櫃: {otc_count})"
+    
+    msg_header = f"<b>【每日選股報告】</b>\n📅 日期: {datetime.date.today()}\n🔎 條件: 3日內雙金叉{stats_info}\n-----------------"
     
     if results:
         msg_body = ""
@@ -143,7 +154,12 @@ if __name__ == "__main__":
             msg_body += line
         
         full_msg = msg_header + msg_body
-        if len(full_msg) > 4000: full_msg = full_msg[:4000] + "\n...(略)"
+        
+        # 避免訊息過長
+        if len(full_msg) > 4000: 
+            full_msg = full_msg[:4000] + "\n...(以下省略)"
+            
         send_telegram_notify(full_msg)
     else:
+        # 即使沒選到股票，也會顯示統計資訊，讓您知道程式有在跑
         send_telegram_notify(msg_header + "\n😴 今日無符合條件的股票。")
