@@ -77,15 +77,16 @@ def get_tw_all_stocks_from_isin():
 # --- 策略核心 ---
 def analyze_stock(ticker):
     try:
-        # 下載資料
-        df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True, progress=False)
+        # 🔥🔥🔥 重要設定：threads=False 避免數據錯亂 🔥🔥🔥
+        df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True, progress=False, threads=False)
         
-        # 🔥 修復 yfinance 雙層標題問題
+        # 處理雙層標題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
         if len(df) < 60: return None
 
+        # 計算指標
         df['Vol_MA60'] = df['Volume'].rolling(window=60).mean()
         df.ta.adx(length=14, append=True)
         df.ta.macd(append=True)
@@ -103,11 +104,9 @@ def analyze_stock(ticker):
         if has_crossover(check_window, 'DMP_14', 'DMN_14') and \
            has_crossover(check_window, 'MACD_12_26_9', 'MACDs_12_26_9'):
             
-            vol_msg = f"{today['Volume']/today['Vol_MA60']:.1f}x" if today['Vol_MA60'] > 0 else "N/A"
             return {
                 "Symbol": ticker,
-                "Price": f"{today['Close']:.2f}",
-                "Vol": vol_msg
+                "Price": f"{today['Close']:.2f}"
             }
     except:
         return None
@@ -115,14 +114,12 @@ def analyze_stock(ticker):
 
 # --- 主程式 ---
 if __name__ == "__main__":
-    print("=== 啟動選股程式 ===")
+    print("=== 啟動選股程式 (簡潔版) ===")
     
-    # 1. 抓取清單
     sp500 = get_sp500_tickers_from_wiki()
     tw_all = get_tw_all_stocks_from_isin()
     all_targets = list(set(sp500 + tw_all))
     
-    # 2. 統計數量
     total_cnt = len(all_targets)
     us_cnt = len(sp500)
     twse_cnt = len([x for x in tw_all if x.endswith('.TW')])
@@ -131,8 +128,9 @@ if __name__ == "__main__":
     print(f"分析目標: {total_cnt} 檔")
     
     results = []
-    # 3. 執行掃描
-    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+    
+    # 保持 20 個執行緒，確保數據正確
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         future_to_stock = {executor.submit(analyze_stock, s): s for s in all_targets}
         for future in concurrent.futures.as_completed(future_to_stock):
             data = future.result()
@@ -140,9 +138,7 @@ if __name__ == "__main__":
                 results.append(data)
                 print(f"發現: {data['Symbol']}")
 
-    # --- 4. 依照您的要求格式組裝訊息 ---
-    
-    # 共用的開頭 (包含統計數據)
+    # --- 整理訊息 ---
     msg_header = (
         f"<b>【每日選股報告】</b>\n"
         f"📅 日期: {datetime.date.today()}\n"
@@ -154,7 +150,8 @@ if __name__ == "__main__":
     if results:
         msg_body = "\n以下是有雙金叉\n-----------------"
         for res in results:
-            line = f"\n🔥 <b>{res['Symbol']}</b> (${res['Price']}) 量:{res['Vol']}"
+            # 🔥 修改處：只保留代號和股價，移除了量比
+            line = f"\n🔥 <b>{res['Symbol']}</b> (${res['Price']})"
             msg_body += line
         
         full_msg = msg_header + msg_body
@@ -164,5 +161,4 @@ if __name__ == "__main__":
             
         send_telegram_notify(full_msg)
     else:
-        # 如果沒抓到股票，顯示稍微不同的結尾
         send_telegram_notify(msg_header + "\n\n😴 今日無符合雙金叉的股票。")
