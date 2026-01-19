@@ -77,7 +77,7 @@ def get_tw_all_stocks_from_isin():
 # --- 策略核心 ---
 def analyze_stock(ticker):
     try:
-        # 🔥🔥🔥 重要設定：threads=False 避免數據錯亂 🔥🔥🔥
+        # 下載資料 (threads=False 確保數據正確)
         df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True, progress=False, threads=False)
         
         # 處理雙層標題
@@ -87,7 +87,7 @@ def analyze_stock(ticker):
         if len(df) < 60: return None
 
         # 計算指標
-        df['Vol_MA60'] = df['Volume'].rolling(window=60).mean()
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean() # 20日均量
         df.ta.adx(length=14, append=True)
         df.ta.macd(append=True)
         
@@ -101,20 +101,42 @@ def analyze_stock(ticker):
                     return True
             return False
 
-        if has_crossover(check_window, 'DMP_14', 'DMN_14') and \
-           has_crossover(check_window, 'MACD_12_26_9', 'MACDs_12_26_9'):
+        # 基礎條件：雙金叉
+        is_basic_match = has_crossover(check_window, 'DMP_14', 'DMN_14') and \
+                         has_crossover(check_window, 'MACD_12_26_9', 'MACDs_12_26_9')
+        
+        if is_basic_match:
+            # 進階條件：成交量 > 20日均量
+            is_vol_match = today['Volume'] > today['Vol_MA20']
             
             return {
                 "Symbol": ticker,
-                "Price": f"{today['Close']:.2f}"
+                "Price": f"{today['Close']:.2f}",
+                "Vol_Strong": is_vol_match # 標記是否符合量增
             }
     except:
         return None
     return None
 
+# --- 訊息發送小幫手 ---
+def build_message(title, data_list, stats_text):
+    msg_header = (
+        f"<b>【每日選股報告 - {title}】</b>\n"
+        f"📅 日期: {datetime.date.today()}\n"
+        f"{stats_text}"
+    )
+    if data_list:
+        msg_body = f"\n以下是符合【{title}】的清單\n-----------------"
+        for res in data_list:
+            line = f"\n🔥 <b>{res['Symbol']}</b> (${res['Price']})"
+            msg_body += line
+        return msg_header + msg_body
+    else:
+        return msg_header + f"\n\n😴 今日無符合【{title}】的股票。"
+
 # --- 主程式 ---
 if __name__ == "__main__":
-    print("=== 啟動選股程式 (簡潔版) ===")
+    print("=== 啟動選股程式 (雙重篩選版) ===")
     
     sp500 = get_sp500_tickers_from_wiki()
     tw_all = get_tw_all_stocks_from_isin()
@@ -125,40 +147,39 @@ if __name__ == "__main__":
     twse_cnt = len([x for x in tw_all if x.endswith('.TW')])
     otc_cnt = len([x for x in tw_all if x.endswith('.TWO')])
     
+    stats_text = (
+        f"📊 掃描統計總共分析 {total_cnt} 檔\n"
+        f"(美股: {us_cnt} ,上市: {twse_cnt}, 上櫃: {otc_cnt} )"
+    )
     print(f"分析目標: {total_cnt} 檔")
     
-    results = []
+    results_basic = [] # 存放第一則 (雙金叉)
+    results_vol = []   # 存放第二則 (雙金叉 + 量增)
     
-    # 保持 20 個執行緒，確保數據正確
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         future_to_stock = {executor.submit(analyze_stock, s): s for s in all_targets}
         for future in concurrent.futures.as_completed(future_to_stock):
             data = future.result()
             if data:
-                results.append(data)
-                print(f"發現: {data['Symbol']}")
+                # 1. 加入基礎清單
+                results_basic.append(data)
+                
+                # 2. 如果符合量增，也加入精選清單
+                if data['Vol_Strong']:
+                    results_vol.append(data)
+                
+                print(f"發現: {data['Symbol']} (量增: {data['Vol_Strong']})")
 
-    # --- 整理訊息 ---
-    msg_header = (
-        f"<b>【每日選股報告】</b>\n"
-        f"📅 日期: {datetime.date.today()}\n"
-        f"🔎 條件: 3日內雙金叉\n"
-        f"📊 掃描統計總共分析 {total_cnt} 檔\n"
-        f"(美股: {us_cnt} ,上市: {twse_cnt}, 上櫃: {otc_cnt} )"
-    )
+    # --- 發送第一則訊息：原始策略 ---
+    msg1 = build_message("純雙金叉版", results_basic, stats_text)
+    if len(msg1) > 4000: msg1 = msg1[:4000] + "\n...(以下省略)"
+    send_telegram_notify(msg1)
     
-    if results:
-        msg_body = "\n以下是有雙金叉\n-----------------"
-        for res in results:
-            # 🔥 修改處：只保留代號和股價，移除了量比
-            line = f"\n🔥 <b>{res['Symbol']}</b> (${res['Price']})"
-            msg_body += line
-        
-        full_msg = msg_header + msg_body
-        
-        if len(full_msg) > 4000: 
-            full_msg = full_msg[:4000] + "\n...(以下省略)"
-            
-        send_telegram_notify(full_msg)
-    else:
-        send_telegram_notify(msg_header + "\n\n😴 今日無符合雙金叉的股票。")
+    # --- 發送第二則訊息：量增濾網 ---
+    # 稍微停頓一下確保順序
+    import time
+    time.sleep(2) 
+    
+    msg2 = build_message("雙金叉+量增版", results_vol, stats_text)
+    if len(msg2) > 4000: msg2 = msg2[:4000] + "\n...(以下省略)"
+    send_telegram_notify(msg2)
