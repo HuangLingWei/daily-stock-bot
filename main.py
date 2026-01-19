@@ -77,9 +77,16 @@ def get_tw_all_stocks_from_isin():
 # --- 策略核心 ---
 def analyze_stock(ticker):
     try:
+        # 下載資料
         df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True, progress=False)
+        
+        # 🔥🔥🔥 必加：修復 yfinance 雙層標題問題 🔥🔥🔥
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
         if len(df) < 60: return None
 
+        # --- 以下不用動 ---
         df['Vol_MA60'] = df['Volume'].rolling(window=60).mean()
         df.ta.adx(length=14, append=True)
         df.ta.macd(append=True)
@@ -101,7 +108,8 @@ def analyze_stock(ticker):
             return {
                 "Symbol": ticker,
                 "Price": f"{today['Close']:.2f}",
-                "Vol": vol_msg
+                "Vol": vol_msg,
+                "Date": today.name.strftime('%Y-%m-%d')
             }
     except:
         return None
