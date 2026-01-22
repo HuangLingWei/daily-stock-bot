@@ -7,6 +7,7 @@ import concurrent.futures
 import datetime
 import os
 import urllib3
+import time
 
 # 關閉 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -74,45 +75,66 @@ def get_tw_all_stocks_from_isin():
     if not all_tickers: return ['2330.TW', '2317.TW']
     return all_tickers
 
-# --- 策略核心 ---
+# --- 策略核心 (修正重點) ---
 def analyze_stock(ticker):
     try:
-        # 下載資料 (threads=False 確保數據正確)
+        # 下載資料
         df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True, progress=False, threads=False)
         
-        # 處理雙層標題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
         if len(df) < 60: return None
 
         # 計算指標
-        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean() # 20日均量
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         df.ta.adx(length=14, append=True)
         df.ta.macd(append=True)
         
+        # 取最後 4 天來檢查
         check_window = df.iloc[-4:]
         today = df.iloc[-1]
 
-        def has_crossover(subset, col_fast, col_slow):
+        # --- 定義 DMI 金叉 (+DI 上穿 -DI) ---
+        def check_dmi_crossover(subset):
+            # DMP(+DI), DMN(-DI)
             for i in range(1, len(subset)):
                 curr, prev = subset.iloc[i], subset.iloc[i-1]
-                if (curr[col_fast] > curr[col_slow]) and (prev[col_fast] <= prev[col_slow]):
+                # 黃金交叉: 今天 +DI > -DI 且 昨天 +DI <= -DI
+                if (curr['DMP_14'] > curr['DMN_14']) and (prev['DMP_14'] <= prev['DMN_14']):
                     return True
             return False
 
-        # 基礎條件：雙金叉
-        is_basic_match = has_crossover(check_window, 'DMP_14', 'DMN_14') and \
-                         has_crossover(check_window, 'MACD_12_26_9', 'MACDs_12_26_9')
+        # --- 定義 MACD 低檔金叉 (快線上穿慢線 且 在0軸下) ---
+        def check_macd_crossover(subset):
+            # MACD_12_26_9(快線), MACDs_12_26_9(慢線)
+            for i in range(1, len(subset)):
+                curr, prev = subset.iloc[i], subset.iloc[i-1]
+                
+                # 1. 交叉檢查: 快線 > 慢線 (今) 且 快線 <= 慢線 (昨)
+                is_cross = (curr['MACD_12_26_9'] > curr['MACDs_12_26_9']) and \
+                           (prev['MACD_12_26_9'] <= prev['MACDs_12_26_9'])
+                
+                # 2. 0軸檢查: 快線要在 0 以下 (符合您的新要求)
+                is_below_zero = curr['MACD_12_26_9'] < 0
+                
+                if is_cross and is_below_zero:
+                    return True
+            return False
+
+        # 執行判斷
+        is_dmi_gold = check_dmi_crossover(check_window)
+        is_macd_gold = check_macd_crossover(check_window)
         
-        if is_basic_match:
+        # 基礎條件：兩個都必須金叉
+        if is_dmi_gold and is_macd_gold:
             # 進階條件：成交量 > 20日均量
             is_vol_match = today['Volume'] > today['Vol_MA20']
             
             return {
                 "Symbol": ticker,
                 "Price": f"{today['Close']:.2f}",
-                "Vol_Strong": is_vol_match # 標記是否符合量增
+                "Vol_Strong": is_vol_match
             }
     except:
         return None
@@ -123,6 +145,7 @@ def build_message(title, data_list, stats_text):
     msg_header = (
         f"<b>【每日選股報告 - {title}】</b>\n"
         f"📅 日期: {datetime.date.today()}\n"
+        f"🔎 條件: 0軸下MACD金叉 + DMI金叉\n"
         f"{stats_text}"
     )
     if data_list:
@@ -136,7 +159,7 @@ def build_message(title, data_list, stats_text):
 
 # --- 主程式 ---
 if __name__ == "__main__":
-    print("=== 啟動選股程式 (雙重篩選版) ===")
+    print("=== 啟動選股程式 (MACD 0軸下修正版) ===")
     
     sp500 = get_sp500_tickers_from_wiki()
     tw_all = get_tw_all_stocks_from_isin()
@@ -153,33 +176,28 @@ if __name__ == "__main__":
     )
     print(f"分析目標: {total_cnt} 檔")
     
-    results_basic = [] # 存放第一則 (雙金叉)
-    results_vol = []   # 存放第二則 (雙金叉 + 量增)
+    results_basic = []
+    results_vol = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         future_to_stock = {executor.submit(analyze_stock, s): s for s in all_targets}
         for future in concurrent.futures.as_completed(future_to_stock):
             data = future.result()
             if data:
-                # 1. 加入基礎清單
                 results_basic.append(data)
-                
-                # 2. 如果符合量增，也加入精選清單
                 if data['Vol_Strong']:
                     results_vol.append(data)
-                
-                print(f"發現: {data['Symbol']} (量增: {data['Vol_Strong']})")
+                print(f"發現: {data['Symbol']}")
 
-    # --- 發送第一則訊息：原始策略 ---
-    msg1 = build_message("純雙金叉版", results_basic, stats_text)
+    # 發送第一則 (低檔雙金叉)
+    msg1 = build_message("低檔起漲版", results_basic, stats_text)
     if len(msg1) > 4000: msg1 = msg1[:4000] + "\n...(以下省略)"
     send_telegram_notify(msg1)
     
-    # --- 發送第二則訊息：量增濾網 ---
-    # 稍微停頓一下確保順序
-    import time
+    # 停頓2秒
     time.sleep(2) 
     
-    msg2 = build_message("雙金叉+量增版", results_vol, stats_text)
+    # 發送第二則 (低檔雙金叉 + 量增)
+    msg2 = build_message("低檔噴發版(量增)", results_vol, stats_text)
     if len(msg2) > 4000: msg2 = msg2[:4000] + "\n...(以下省略)"
     send_telegram_notify(msg2)
