@@ -4,7 +4,7 @@ on:
   schedule:
     # 設定每天執行時間 (UTC 時間)
     # UTC 07:30 = 台灣時間 15:30 (下午3點半收盤後)
-    - cron: '30 07 * * *'
+    - cron: '00 07 * * *'
   workflow_dispatch: # 允許手動按按鈕測試
 
 jobs:
