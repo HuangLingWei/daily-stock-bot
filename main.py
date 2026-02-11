@@ -75,11 +75,10 @@ def get_tw_all_stocks_from_isin():
     if not all_tickers: return ['2330.TW', '2317.TW']
     return all_tickers
 
-# --- 策略核心 (8H 級別修正版) ---
+# --- 策略核心 (4H 級別修正版) ---
 def analyze_stock(ticker):
     try:
-        # 🔥 修改 1: 下載 '1h' 資料，並抓取最大範圍 '730d' (約2年)
-        # 這是為了確保合成 8h 後，還有足夠的 K 棒算指標
+        # 下載 1小時資料，最大範圍 730天
         df = yf.download(ticker, period="730d", interval="1h", auto_adjust=True, progress=False, threads=False)
         
         # 處理雙層標題
@@ -88,9 +87,8 @@ def analyze_stock(ticker):
             
         if df.empty: return None
 
-        # 🔥 修改 2: 合成 8小時 (Resample)
-        # 邏輯：每 8 根 1h K棒 -> 合成 1 根 8h K棒
-        # Open取第一筆, High取最大, Low取最小, Close取最後一筆, Volume取總和
+        # 🔥 修改處：合成 4小時 (Resample 4h)
+        # 這樣 K 棒數量會比 8h 多一倍，更容易形成技術指標
         ohlc_dict = {
             'Open': 'first',
             'High': 'max',
@@ -98,27 +96,25 @@ def analyze_stock(ticker):
             'Close': 'last',
             'Volume': 'sum'
         }
-        # 只有當資料夠多時才做，不然會報錯
+        
         try:
-            df_8h = df.resample('8h').agg(ohlc_dict).dropna()
+            # 將 1h 資料合成 4h
+            df_4h = df.resample('4h').agg(ohlc_dict).dropna()
         except:
-            return None # 資料太少無法合成
+            return None 
 
-        # 檢查合成後的長度 (至少要有 60 根才能算 EMA60)
-        if len(df_8h) < 60: return None
+        # 檢查長度: EMA60 至少需要 60 根 + 前置運算，設 65 比較保險
+        if len(df_4h) < 65: return None
         
-        # 接下來使用 df_8h (8小時線) 來計算指標
-        df = df_8h 
+        # 使用 4h 資料進行計算
+        df = df_4h 
 
         # ==========================================
-        # 1. 計算所有指標 (參數不變，但現在是算在 8h K棒上)
+        # 1. 計算所有指標 (4H級別)
         # ==========================================
         
-        # 基礎指標
         df.ta.macd(append=True) 
         df.ta.adx(length=14, append=True) 
-        
-        # 新戰隊指標
         df.ta.kdj(length=9, signal=3, append=True) 
         df.ta.bbands(length=20, std=2, append=True)
         df.ta.ema(length=60, append=True)
@@ -141,8 +137,9 @@ def analyze_stock(ticker):
         def check_kdj_low_gold(subset):
             for i in range(1, len(subset)):
                 curr, prev = subset.iloc[i], subset.iloc[i-1]
+                # 金叉
                 if (curr['K_9_3'] > curr['D_9_3']) and (prev['K_9_3'] <= prev['D_9_3']):
-                    # 寬容度調整：8H級別比較大，K值小於 35 即可視為低檔
+                    # 低檔標準：4H 級別設 35
                     if curr['K_9_3'] < 35:
                         return True
             return False
@@ -153,6 +150,7 @@ def analyze_stock(ticker):
         
         # --- 策略 1: 0軸下 MACD 金叉 + DMI 金叉 ---
         macd_gold = check_crossover(check_window, 'MACD_12_26_9', 'MACDs_12_26_9')
+        # MACD 柱狀體翻紅或快線向上，且在 0 軸下
         macd_low = today['MACD_12_26_9'] < 0
         dmi_gold = check_crossover(check_window, 'DMP_14', 'DMN_14')
         
@@ -162,18 +160,22 @@ def analyze_stock(ticker):
         strategy_2_type = None 
 
         # 2A. 抓「壓縮爆發」
+        # 收盤價突破布林上軌
         is_breakout = (today['Close'] > today['BBU_20_2.0'])
+        # ADX > 20 代表有趨勢，且是多方趨勢 (+DI > -DI)
         is_adx_strong = (today['ADX_14'] > 20) and (today['DMP_14'] > today['DMN_14'])
         
         if is_breakout and is_adx_strong:
-            strategy_2_type = "🚀 8H突破"
+            strategy_2_type = "🚀 4H突破"
 
         # 2B. 抓「回調轉折」
+        # 股價在 EMA60 之上 (多頭)
         is_trend_up = today['Close'] > today['EMA_60']
+        # KDJ 低檔金叉
         is_kdj_buy = check_kdj_low_gold(check_window)
         
         if is_trend_up and is_kdj_buy:
-            strategy_2_type = "⚡️ 8H回調"
+            strategy_2_type = "⚡️ 4H回調"
 
         if is_strategy_1 or strategy_2_type:
             return {
@@ -192,7 +194,7 @@ def build_message(title, condition_desc, data_list, stats_text):
     msg_header = (
         f"<b>【{title}】</b>\n"
         f"📅 {datetime.date.today()}\n"
-        f"⏳ 級別: 8小時 (8H)\n"
+        f"⏳ 級別: 4小時 (4H)\n"
         f"🔎 {condition_desc}\n"
         f"{stats_text}"
     )
@@ -204,7 +206,7 @@ def build_message(title, condition_desc, data_list, stats_text):
             if "S2_Type" in res and res["S2_Type"]:
                 tag = f" ({res['S2_Type']})"
             
-            line = f"\n🔥 <b>{res['Symbol']}</b> ${res['Price']}{tag}"
+            line = f"\n🔥 <b>{res['Symbol']}</b> (${res['Price']}{tag})"
             msg_body += line
         return msg_header + msg_body
     else:
@@ -212,7 +214,7 @@ def build_message(title, condition_desc, data_list, stats_text):
 
 # --- 主程式 ---
 if __name__ == "__main__":
-    print("=== 啟動選股程式 (8H級別版) ===")
+    print("=== 啟動選股程式 (4H級別版) ===")
     
     sp500 = get_sp500_tickers_from_wiki()
     tw_all = get_tw_all_stocks_from_isin()
@@ -243,7 +245,7 @@ if __name__ == "__main__":
                 print(f"發現: {data['Symbol']}")
 
     msg1 = build_message(
-        "策略一：8H底部反轉", 
+        "策略一：4H底部反轉", 
         "MACD(0軸下) + DMI金叉", 
         list_strategy_1, 
         stats_text
@@ -254,7 +256,7 @@ if __name__ == "__main__":
     time.sleep(2) 
     
     msg2 = build_message(
-        "策略二：8H波段戰隊", 
+        "策略二：4H波段戰隊", 
         "A:布林突破 / B:EMA回調", 
         list_strategy_2, 
         stats_text
