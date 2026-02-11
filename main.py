@@ -75,20 +75,20 @@ def get_tw_all_stocks_from_isin():
     if not all_tickers: return ['2330.TW', '2317.TW']
     return all_tickers
 
-# --- 策略核心 (4H 級別修正版) ---
+# --- 策略核心 (Debug 修復版) ---
 def analyze_stock(ticker):
     try:
-        # 下載 1小時資料，最大範圍 730天
+        # 下載資料
         df = yf.download(ticker, period="730d", interval="1h", auto_adjust=True, progress=False, threads=False)
         
         # 處理雙層標題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
-        if df.empty: return None
+        if df.empty: 
+            return None
 
-        # 🔥 修改處：合成 4小時 (Resample 4h)
-        # 這樣 K 棒數量會比 8h 多一倍，更容易形成技術指標
+        # 合成 4小時
         ohlc_dict = {
             'Open': 'first',
             'High': 'max',
@@ -98,33 +98,52 @@ def analyze_stock(ticker):
         }
         
         try:
-            # 將 1h 資料合成 4h
             df_4h = df.resample('4h').agg(ohlc_dict).dropna()
-        except:
+        except Exception as e:
+            # print(f"❌ {ticker} Resample 失敗: {e}") # Debug用，太吵可註解
             return None 
 
-        # 檢查長度: EMA60 至少需要 60 根 + 前置運算，設 65 比較保險
-        if len(df_4h) < 65: return None
+        # 🔥 修改: 放寬限制到 50 根，避免過濾太多
+        if len(df_4h) < 50: 
+            return None
         
-        # 使用 4h 資料進行計算
         df = df_4h 
 
         # ==========================================
-        # 1. 計算所有指標 (4H級別)
+        # 1. 計算所有指標
         # ==========================================
         
-        df.ta.macd(append=True) 
-        df.ta.adx(length=14, append=True) 
-        df.ta.kdj(length=9, signal=3, append=True) 
-        df.ta.bbands(length=20, std=2, append=True)
-        df.ta.ema(length=60, append=True)
-        
-        # 取最後一段資料來檢查
+        # 使用 try-except 包裹指標計算，避免 pandas_ta 報錯導致跳出
+        try:
+            df.ta.macd(append=True) 
+            df.ta.adx(length=14, append=True) 
+            df.ta.kdj(length=9, signal=3, append=True) 
+            df.ta.bbands(length=20, std=2, append=True)
+            df.ta.ema(length=60, append=True)
+        except:
+            return None
+
         check_window = df.iloc[-4:]
         today = df.iloc[-1]
         
+        # 🔥 修改: 自動尋找正確的欄位名稱 (避免 Key Error)
+        cols = df.columns.tolist()
+        
+        # 找 K, D
+        k_col = next((c for c in cols if c.startswith('K_')), None)
+        d_col = next((c for c in cols if c.startswith('D_')), None)
+        # 找 布林上軌 (BBU)
+        bbu_col = next((c for c in cols if c.startswith('BBU')), None)
+        # 找 EMA
+        ema_col = next((c for c in cols if c.startswith('EMA')), None)
+
+        # 如果關鍵欄位沒找到，就跳過
+        if not (k_col and d_col and bbu_col and ema_col):
+            # print(f"⚠️ {ticker} 找不到指標欄位: {cols}")
+            return None
+
         # ==========================================
-        # 2. 定義判斷邏輯函數
+        # 2. 定義判斷邏輯
         # ==========================================
 
         def check_crossover(subset, fast_col, slow_col):
@@ -137,10 +156,9 @@ def analyze_stock(ticker):
         def check_kdj_low_gold(subset):
             for i in range(1, len(subset)):
                 curr, prev = subset.iloc[i], subset.iloc[i-1]
-                # 金叉
-                if (curr['K_9_3'] > curr['D_9_3']) and (prev['K_9_3'] <= prev['D_9_3']):
-                    # 低檔標準：4H 級別設 35
-                    if curr['K_9_3'] < 35:
+                # 使用動態抓到的欄位名
+                if (curr[k_col] > curr[d_col]) and (prev[k_col] <= prev[d_col]):
+                    if curr[k_col] < 35:
                         return True
             return False
 
@@ -148,30 +166,27 @@ def analyze_stock(ticker):
         # 3. 策略判定
         # ==========================================
         
-        # --- 策略 1: 0軸下 MACD 金叉 + DMI 金叉 ---
+        # --- 策略 1 ---
         macd_gold = check_crossover(check_window, 'MACD_12_26_9', 'MACDs_12_26_9')
-        # MACD 柱狀體翻紅或快線向上，且在 0 軸下
         macd_low = today['MACD_12_26_9'] < 0
         dmi_gold = check_crossover(check_window, 'DMP_14', 'DMN_14')
         
         is_strategy_1 = macd_gold and macd_low and dmi_gold
 
-        # --- 策略 2: 短線波段戰隊 ---
+        # --- 策略 2 ---
         strategy_2_type = None 
 
         # 2A. 抓「壓縮爆發」
-        # 收盤價突破布林上軌
-        is_breakout = (today['Close'] > today['BBU_20_2.0'])
-        # ADX > 20 代表有趨勢，且是多方趨勢 (+DI > -DI)
+        # 使用動態欄位 bbu_col
+        is_breakout = (today['Close'] > today[bbu_col])
         is_adx_strong = (today['ADX_14'] > 20) and (today['DMP_14'] > today['DMN_14'])
         
         if is_breakout and is_adx_strong:
             strategy_2_type = "🚀 4H突破"
 
         # 2B. 抓「回調轉折」
-        # 股價在 EMA60 之上 (多頭)
-        is_trend_up = today['Close'] > today['EMA_60']
-        # KDJ 低檔金叉
+        # 使用動態欄位 ema_col
+        is_trend_up = today['Close'] > today[ema_col]
         is_kdj_buy = check_kdj_low_gold(check_window)
         
         if is_trend_up and is_kdj_buy:
@@ -185,7 +200,9 @@ def analyze_stock(ticker):
                 "S2_Type": strategy_2_type
             }
 
-    except:
+    except Exception as e:
+        # 🔥🔥🔥 這裡最重要！如果有錯誤，會直接印出來，我們才知道為什麼掛掉
+        print(f"❌ {ticker} 發生嚴重錯誤: {e}")
         return None
     return None
 
@@ -194,7 +211,7 @@ def build_message(title, condition_desc, data_list, stats_text):
     msg_header = (
         f"<b>【{title}】</b>\n"
         f"📅 {datetime.date.today()}\n"
-        f"⏳ 級別: 4小時 (4H)\n"
+        f"⏳ 級別: 4小時 (4H) [Debug版]\n"
         f"🔎 {condition_desc}\n"
         f"{stats_text}"
     )
@@ -210,11 +227,11 @@ def build_message(title, condition_desc, data_list, stats_text):
             msg_body += line
         return msg_header + msg_body
     else:
-        return msg_header + "\n\n😴 今日無符合訊號。"
+        return msg_header + "\n\n😴 今日無符合訊號 (請檢查後台 Log 看是否有錯誤)。"
 
 # --- 主程式 ---
 if __name__ == "__main__":
-    print("=== 啟動選股程式 (4H級別版) ===")
+    print("=== 啟動選股程式 (4H Debug版) ===")
     
     sp500 = get_sp500_tickers_from_wiki()
     tw_all = get_tw_all_stocks_from_isin()
@@ -231,8 +248,8 @@ if __name__ == "__main__":
     list_strategy_1 = [] 
     list_strategy_2 = [] 
     
-    # 維持 20 執行緒
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    # 這裡稍微減少執行緒，避免 print 亂掉，方便除錯
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_stock = {executor.submit(analyze_stock, s): s for s in all_targets}
         for future in concurrent.futures.as_completed(future_to_stock):
             data = future.result()
@@ -242,24 +259,22 @@ if __name__ == "__main__":
                 if data['S2_Type']:
                     list_strategy_2.append(data)
                     
-                print(f"發現: {data['Symbol']}")
+                print(f"✅ 發現訊號: {data['Symbol']}")
 
     msg1 = build_message(
-        "策略一：4H底部反轉", 
+        "策略一：底部反轉", 
         "MACD(0軸下) + DMI金叉", 
         list_strategy_1, 
         stats_text
     )
-    if len(msg1) > 4000: msg1 = msg1[:4000] + "\n...(略)"
     send_telegram_notify(msg1)
     
     time.sleep(2) 
     
     msg2 = build_message(
-        "策略二：4H波段戰隊", 
+        "策略二：波段戰隊", 
         "A:布林突破 / B:EMA回調", 
         list_strategy_2, 
         stats_text
     )
-    if len(msg2) > 4000: msg2 = msg2[:4000] + "\n...(略)"
     send_telegram_notify(msg2)
