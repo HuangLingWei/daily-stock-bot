@@ -1,0 +1,28 @@
+# 環境變數與機密金鑰（嚴禁上傳）
+    .env
+    .env.local
+    *.json.key
+    service_account*.json
+
+    # Python 快取與虛擬環境
+    __pycache__/
+    *.py[cod]
+    *$py.class
+    .venv/
+    venv/
+    ENV/
+    build/
+    dist/
+
+    # Jupyter Notebook 暫存檔
+    .ipynb_checkpoints/
+
+    # 機器學習暫存模型檔
+    *.pkl
+    *.joblib
+
+    # 編輯器與作業系統暫存
+    .vscode/
+    .idea/
+    .DS_Store
+    Thumbs.db
